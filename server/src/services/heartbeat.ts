@@ -5978,6 +5978,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
+  function parseDispatchPolicy(agent: typeof agents.$inferSelect): { mode: "inline" | "external" } {
+    const runtimeConfig = parseObject(agent.runtimeConfig);
+    const dispatch = parseObject(runtimeConfig.dispatch);
+    // Secure default: anything other than the explicit "external" opt-in stays
+    // inline so a malformed/absent value never silently disables server dispatch.
+    return { mode: dispatch.mode === "external" ? "external" : "inline" };
+  }
+
   function parseMaxTurnContinuationPolicy(agent: typeof agents.$inferSelect): MaxTurnContinuationPolicy {
     const runtimeConfig = parseObject(agent.runtimeConfig);
     const heartbeat = parseObject(runtimeConfig.heartbeat);
@@ -7013,10 +7021,51 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
   }
 
+  // Resolve a run owned by an external-dispatch agent without spawning the
+  // adapter. wakeup() already created the run record for observability; here we
+  // only move it to a terminal status and leave actual execution to the agent's
+  // out-of-band consumer (e.g. Comp autopoll + SendKeys driving claude_local).
+  async function finalizeExternalDispatchSkippedRun(
+    run: typeof heartbeatRuns.$inferSelect,
+  ) {
+    const now = new Date();
+    const context = parseObject(run.contextSnapshot);
+    const wakeReason =
+      readNonEmptyString(context.wakeReason) ?? readNonEmptyString(context.reason) ?? null;
+    const finalized = await setRunStatus(run.id, "external_dispatch_skipped", {
+      startedAt: run.startedAt ?? now,
+      finishedAt: now,
+      resultJson: {
+        ...parseObject(run.resultJson),
+        dispatchMode: "external",
+        externalDispatchSkipped: true,
+        wakeReason,
+      },
+    });
+    await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now });
+    const finalizedRun = finalized ?? (await getRun(run.id));
+    if (finalizedRun) {
+      // No-op for the lock when we gate before claimQueuedRun (we never stamped
+      // executionRunId), but still promotes any deferred wakes for the issue and
+      // is idempotent if a running external run ever reaches this path.
+      await releaseIssueExecutionAndPromote(finalizedRun);
+    }
+  }
+
   async function executeRun(runId: string) {
     let run = await getRun(runId);
     if (!run) return;
     if (run.status !== "queued" && run.status !== "running") return;
+
+    // Dispatch gate (IGG-555 / IGG-504 Option 2): when the agent is configured
+    // for external dispatch, the server must not spawn the adapter inline. Gate
+    // before claimQueuedRun so we never take the issue execution lock on the
+    // agent's behalf; the external consumer owns checkout + execution.
+    const dispatchAgent = await getAgent(run.agentId);
+    if (dispatchAgent && parseDispatchPolicy(dispatchAgent).mode === "external") {
+      await finalizeExternalDispatchSkippedRun(run);
+      return;
+    }
 
     if (run.status === "queued") {
       const claimed = await claimQueuedRun(run);

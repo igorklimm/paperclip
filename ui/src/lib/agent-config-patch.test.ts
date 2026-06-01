@@ -52,6 +52,7 @@ function makeOverlay(patch?: Partial<AgentConfigOverlay>): AgentConfigOverlay {
     identity: {},
     adapterConfig: {},
     heartbeat: {},
+    dispatch: {},
     runtime: {},
     ...patch,
   };
@@ -74,6 +75,27 @@ describe("buildAgentUpdatePatch", () => {
         promptTemplate: "Work the issue.",
       },
       replaceAdapterConfig: true,
+    });
+  });
+
+  it("writes dispatch.mode under runtimeConfig while preserving existing heartbeat config", () => {
+    const patch = buildAgentUpdatePatch(
+      makeAgent(),
+      makeOverlay({
+        dispatch: { mode: "external" },
+      }),
+    );
+
+    expect(patch).toEqual({
+      runtimeConfig: {
+        heartbeat: {
+          enabled: true,
+          intervalSec: 300,
+        },
+        dispatch: {
+          mode: "external",
+        },
+      },
     });
   });
 

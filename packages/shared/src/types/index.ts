@@ -89,6 +89,7 @@ export type {
   AgentAccessState,
   AgentChainOfCommandEntry,
   AgentDetail,
+  AgentDispatchConfig,
   AgentModelProfileConfig,
   AgentPermissions,
   AgentRuntimeConfig,

@@ -595,8 +595,16 @@ export const HEARTBEAT_RUN_STATUSES = [
   "failed",
   "cancelled",
   "timed_out",
+  "external_dispatch_skipped",
 ] as const;
 export type HeartbeatRunStatus = (typeof HEARTBEAT_RUN_STATUSES)[number];
+
+// Per-agent dispatch mode. "inline" (default) spawns the agent's adapter on the
+// server host. "external" leaves execution to an out-of-band consumer (e.g. Comp
+// autopoll + SendKeys driving claude_local locally); the server still records the
+// run for observability but does not spawn the adapter.
+export const AGENT_DISPATCH_MODES = ["inline", "external"] as const;
+export type AgentDispatchMode = (typeof AGENT_DISPATCH_MODES)[number];
 
 export const RUN_LIVENESS_STATES = [
   "completed",
