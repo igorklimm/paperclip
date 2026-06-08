@@ -4107,6 +4107,110 @@ export function issueService(db: Db) {
       return getIssueByIdentifier(identifier);
     },
 
+    // Atomic compare-and-swap claim: assign the issue to `agentId` only if it is
+    // currently unassigned. Every read AND the CAS carries the `company_id`
+    // predicate, so the no-cross-tenant / no-existence-oracle property is enforced
+    // by a predicate at every step, not by step ordering.
+    claim: async (input: {
+      id: string;
+      agentId: string;
+      companyId: string;
+    }): Promise<
+      | { outcome: "not_found" }
+      | { outcome: "claimed"; issue: IssueWithLabels; prevAssignee: string | null }
+      | { outcome: "already_claimed"; currentAssigneeAgentId: string | null }
+    > => {
+      const { id, agentId, companyId } = input;
+
+      // Tenant + existence gate. Single lookup keyed on id; company is checked
+      // in-app so an unknown id and a cross-tenant id yield an identical 404.
+      const existing = await db
+        .select({
+          id: issues.id,
+          companyId: issues.companyId,
+          status: issues.status,
+          assigneeAgentId: issues.assigneeAgentId,
+        })
+        .from(issues)
+        .where(eq(issues.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!existing || existing.companyId !== companyId) {
+        return { outcome: "not_found" };
+      }
+
+      const now = new Date();
+
+      // Idempotent fast-path: the rightful owner re-claims. Apply the
+      // todo->in_progress bump if still todo so the claimed=>in_progress
+      // invariant holds even on re-claim, then return without a fresh wake.
+      if (existing.assigneeAgentId === agentId) {
+        if (existing.status === "todo") {
+          const bumped = await db
+            .update(issues)
+            .set({ status: "in_progress", updatedAt: now })
+            .where(
+              and(
+                eq(issues.id, id),
+                eq(issues.companyId, companyId),
+                eq(issues.assigneeAgentId, agentId),
+                eq(issues.status, "todo"),
+              ),
+            )
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          if (bumped) {
+            const [enriched] = await withIssueLabels(db, [bumped]);
+            return { outcome: "claimed", issue: enriched, prevAssignee: agentId };
+          }
+        }
+        const row = await db
+          .select()
+          .from(issues)
+          .where(and(eq(issues.id, id), eq(issues.companyId, companyId)))
+          .then((rows) => rows[0] ?? null);
+        if (!row) return { outcome: "not_found" };
+        const [enriched] = await withIssueLabels(db, [row]);
+        return { outcome: "claimed", issue: enriched, prevAssignee: agentId };
+      }
+
+      // Atomic CAS — the real race point. A single conditional UPDATE: under
+      // READ COMMITTED the loser blocks on the row lock, re-evaluates WHERE
+      // against the committed row, finds assignee no longer NULL, and affects 0
+      // rows. Only `todo` is bumped to `in_progress`; other statuses untouched.
+      const claimed = await db
+        .update(issues)
+        .set({
+          assigneeAgentId: agentId,
+          status: sql`CASE WHEN ${issues.status} = 'todo' THEN 'in_progress' ELSE ${issues.status} END`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(issues.id, id),
+            eq(issues.companyId, companyId),
+            isNull(issues.assigneeAgentId),
+          ),
+        )
+        .returning()
+        .then((rows) => rows[0] ?? null);
+
+      if (claimed) {
+        const [enriched] = await withIssueLabels(db, [claimed]);
+        return { outcome: "claimed", issue: enriched, prevAssignee: null };
+      }
+
+      // 0 rows: lost the race. Re-read with the same id + company predicate
+      // (defense-in-depth: do not rely on the step-1 lookup) to populate the
+      // 409 diagnostic with a same-company assignee.
+      const current = await db
+        .select({ assigneeAgentId: issues.assigneeAgentId })
+        .from(issues)
+        .where(and(eq(issues.id, id), eq(issues.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (!current) return { outcome: "not_found" };
+      return { outcome: "already_claimed", currentAssigneeAgentId: current.assigneeAgentId };
+    },
+
     getCurrentScheduledRetry: async (issueId: string) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })

@@ -3427,6 +3427,83 @@ export function issueRoutes(
     res.json(removed ?? { ok: true });
   });
 
+  router.post("/issues/:id/claim", async (req, res) => {
+    // Claim is an agent-pull primitive; it must NOT require board scope.
+    if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
+      res.status(403).json({ ok: false, reason: "agent_scope_required" });
+      return;
+    }
+    const id = req.params.id as string;
+    const callerAgentId = req.actor.agentId;
+    const callerCompanyId = req.actor.companyId;
+
+    const result = await svc.claim({
+      id,
+      agentId: callerAgentId,
+      companyId: callerCompanyId,
+    });
+
+    if (result.outcome === "not_found") {
+      // Identical body whether the id is unknown or cross-tenant (no oracle).
+      // The `reason` field is present so clients can distinguish this from a
+      // bare framework 404 (route not deployed).
+      res.status(404).json({ ok: false, reason: "issue_not_found" });
+      return;
+    }
+
+    if (result.outcome === "already_claimed") {
+      res.status(409).json({
+        ok: false,
+        claimed: false,
+        currentAssigneeAgentId: result.currentAssigneeAgentId,
+        reason: "already_claimed",
+      });
+      return;
+    }
+
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: callerCompanyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.claimed",
+      entityType: "issue",
+      entityId: result.issue.id,
+      details: { prevAssignee: result.prevAssignee, result: "claimed" },
+    });
+
+    // Fire the assignment wake only for a fresh claim (a NULL->caller transition).
+    // An idempotent re-claim by the rightful owner (prevAssignee === caller) must
+    // not re-wake. Backlog issues are never auto-woken, mirroring the PATCH path.
+    if (result.prevAssignee !== callerAgentId && result.issue.status !== "backlog") {
+      void heartbeat.wakeup(callerAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: {
+          issueId: result.issue.id,
+          mutation: "claim",
+        },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: result.issue.id,
+          taskId: result.issue.id,
+          source: "issue.claim",
+          wakeReason: "issue_assigned",
+        },
+      }).catch((err) =>
+        logger.warn(
+          { err, issueId: result.issue.id, agentId: callerAgentId },
+          "failed to wake agent after claim",
+        ));
+    }
+
+    res.status(200).json({ ok: true, claimed: true, issue: result.issue });
+  });
+
   router.get("/issues/:id/approvals", async (req, res) => {
     const id = req.params.id as string;
     const issue = await svc.getById(id);
