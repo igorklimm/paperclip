@@ -1,5 +1,6 @@
 import type {
   AgentAdapterType,
+  AgentDispatchMode,
   ModelProfileKey,
   PauseReason,
   AgentRole,
@@ -20,8 +21,13 @@ export interface AgentModelProfileConfig {
   adapterConfig: Record<string, unknown>;
 }
 
+export interface AgentDispatchConfig {
+  mode?: AgentDispatchMode;
+}
+
 export interface AgentRuntimeConfig extends Record<string, unknown> {
   modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
+  dispatch?: AgentDispatchConfig;
 }
 
 export type AgentInstructionsBundleMode = "managed" | "external";

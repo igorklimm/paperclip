@@ -108,11 +108,16 @@ const emptyOverlay: AgentConfigOverlay = {
   identity: {},
   adapterConfig: {},
   heartbeat: {},
+  dispatch: {},
   runtime: {},
 };
 
 /** Stable empty object used as fallback for missing env config to avoid new-object-per-render. */
 const EMPTY_ENV: Record<string, EnvBinding> = {};
+
+export function supportsAdapterModelRefresh(adapterType: string): boolean {
+  return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "acpx_local";
+}
 
 function isOverlayDirty(o: AgentConfigOverlay): boolean {
   return (
@@ -120,6 +125,7 @@ function isOverlayDirty(o: AgentConfigOverlay): boolean {
     o.adapterType !== undefined ||
     Object.keys(o.adapterConfig).length > 0 ||
     Object.keys(o.heartbeat).length > 0 ||
+    Object.keys(o.dispatch).length > 0 ||
     Object.keys(o.runtime).length > 0 ||
     o.modelProfiles?.cheap !== undefined
   );
@@ -261,7 +267,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   const isDirty = !isCreate && isOverlayDirty(overlay);
 
-  type RecordOverlayGroup = "identity" | "adapterConfig" | "heartbeat" | "runtime";
+  type RecordOverlayGroup = "identity" | "adapterConfig" | "heartbeat" | "dispatch" | "runtime";
 
   /** Read effective value: overlay if dirty, else original */
   function eff<T>(group: RecordOverlayGroup, field: string, original: T): T {
@@ -650,6 +656,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           enabled: val!.heartbeatEnabled,
           intervalSec: val!.intervalSec,
         },
+        dispatch: {} as Record<string, unknown>,
       };
     }
     const mergedHeartbeat = {
@@ -658,12 +665,22 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         : {}),
       ...overlay.heartbeat,
     };
+    const mergedDispatch = {
+      ...(runtimeConfig.dispatch && typeof runtimeConfig.dispatch === "object"
+        ? runtimeConfig.dispatch as Record<string, unknown>
+        : {}),
+      ...overlay.dispatch,
+    };
     return {
       ...runtimeConfig,
       heartbeat: mergedHeartbeat,
+      dispatch: mergedDispatch,
     };
-  }, [isCreate, overlay.heartbeat, runtimeConfig, val]);
+  }, [isCreate, overlay.heartbeat, overlay.dispatch, runtimeConfig, val]);
   const effectiveHeartbeat = asObject(effectiveRuntimeConfig.heartbeat);
+  const effectiveDispatch = asObject(effectiveRuntimeConfig.dispatch);
+  const effectiveDispatchMode =
+    effectiveDispatch.mode === "external" ? "external" : "inline";
   const maxTurnContinuation = asObject(effectiveHeartbeat.maxTurnContinuation);
   const maxTurnContinuationEnabled = asBoolean(maxTurnContinuation.enabled, true);
   const maxTurnContinuationMaxAttempts = clampInteger(
@@ -1006,7 +1023,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       return result.data?.model ?? null;
                     }}
                 onRefreshModels={
-                  adapterType === "codex_local" || adapterType === "acpx_local"
+                  supportsAdapterModelRefresh(adapterType)
                     ? handleRefreshModels
                     : undefined
                 }
@@ -1253,6 +1270,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   className={inputClass}
                 />
               </Field>
+              <ToggleField
+                label="External dispatch"
+                hint="When on, the server records each wake for observability but does not spawn the adapter inline. Execution is left to an out-of-band consumer (e.g. Comp autopoll + SendKeys). Board-only."
+                checked={effectiveDispatchMode === "external"}
+                onChange={(v) => mark("dispatch", "mode", v ? "external" : "inline")}
+              />
               <div className="rounded-md border border-border/70 px-3 py-2">
                 <ToggleField
                   label="Continue after max-turn stop"
